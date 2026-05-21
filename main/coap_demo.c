@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -15,14 +16,16 @@
 static const char *TAG = "coap_demo";
 #define COAP_PORT 5683
 
-static float g_current_temp = 24.5f;
-static coap_resource_t *g_env_temp_resource = NULL;
-static uint32_t g_notify_count = 0;
+#define ENV_TEMP_MAX_AGE_S 60u
+#define ENV_TEMP_HEARTBEAT_S 45u
+#define ENV_TEMP_HEARTBEAT_TICKS pdMS_TO_TICKS(ENV_TEMP_HEARTBEAT_S * 1000)
 
-// CBOR encoder for {"t": <float16>} — six bytes.
-//   A1            map(1)
-//   61 74         text(1) "t"
-//   F9 hh ll      float16, big-endian, IEEE 754 half-precision
+static float g_current_temp = 24.5f;
+static float g_last_notified_temp = 24.5f;
+static TickType_t g_last_notify_tick = 0;
+static coap_resource_t *g_env_temp_resource = NULL;
+static int g_notify_count = 0;
+static bool g_suppress_threshold = false;
 
 static uint16_t float32_to_float16(float f) {
   uint32_t x;
@@ -31,9 +34,9 @@ static uint16_t float32_to_float16(float f) {
   int32_t exp = ((x >> 23) & 0xFF) - 127 + 15;
   uint32_t mant = (x >> 13) & 0x3FF;
   if (exp <= 0)
-    return (uint16_t)sign; // underflow → ±0
+    return (uint16_t)sign;
   if (exp >= 31)
-    return (uint16_t)(sign | 0x7C00); // overflow → ±inf
+    return (uint16_t)(sign | 0x7C00);
   return (uint16_t)(sign | ((uint32_t)exp << 10) | mant);
 }
 
@@ -48,7 +51,6 @@ static size_t encode_env_temp_cbor(float value, uint8_t out[6]) {
   return 6;
 }
 
-// /env/temp GET handler — libcoap-3 opaque-PDU API
 static void hnd_env_temp_get(coap_resource_t *resource, coap_session_t *session,
                              const coap_pdu_t *request,
                              const coap_string_t *query, coap_pdu_t *response) {
@@ -59,32 +61,21 @@ static void hnd_env_temp_get(coap_resource_t *resource, coap_session_t *session,
   uint8_t buf[6];
   size_t len = encode_env_temp_cbor(g_current_temp, buf);
 
-  coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT); // 2.05
+  coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
 
   unsigned char encoded[4];
   coap_add_option(response, COAP_OPTION_CONTENT_FORMAT,
                   coap_encode_var_safe(encoded, sizeof(encoded),
                                        COAP_MEDIATYPE_APPLICATION_CBOR),
                   encoded);
+  coap_add_option(
+      response, COAP_OPTION_MAXAGE,
+      coap_encode_var_safe(encoded, sizeof(encoded), ENV_TEMP_MAX_AGE_S),
+      encoded);
   ESP_LOGI(TAG, "CoAP response payload bytes: %u", (unsigned)len);
   coap_add_data(response, len, buf);
 
   ESP_LOGI(TAG, "GET /env/temp -> %.2f C (6 B CBOR)", g_current_temp);
-}
-
-// Simulates a drifting sensor. Called from the main loop every 5 s.
-// Notifies observers on every change so Observe is easy to verify.
-static void update_temp_and_notify(coap_context_t *ctx) {
-  float delta = ((float)(esp_random() % 1000) / 1000.0f - 0.5f) * 0.6f; // ±0.3
-  if ((esp_random() % 10) == 0)
-    delta += (esp_random() & 1) ? 1.5f : -1.5f;
-  g_current_temp += delta;
-
-  g_notify_count++;
-  // ESP_LOGI(TAG, "[%u] temp=%.2f C, notifying observers", g_notify_count,
-  // g_current_temp);
-  if (g_env_temp_resource)
-    coap_resource_notify_observers(g_env_temp_resource, NULL);
 }
 
 static void coap_server_task(void *pvParameters) {
@@ -121,12 +112,56 @@ static void coap_server_task(void *pvParameters) {
   ESP_LOGI(TAG, "CoAP server listening on UDP/%d, resource /env/temp",
            COAP_PORT);
 
+  // Temperature simulation parameters
+  const float baseline = 24.5f;
+  const float amp_c = 1.0f;
+  const float period_s = 20.0f;
   TickType_t last_update = xTaskGetTickCount();
+  g_last_notify_tick = xTaskGetTickCount();
+
   while (1) {
-    coap_io_process(ctx, 1000);
-    if ((xTaskGetTickCount() - last_update) >= pdMS_TO_TICKS(5000)) {
-      last_update = xTaskGetTickCount();
-      update_temp_and_notify(ctx);
+    // Process IO events (including sending pending notifications)
+    coap_io_process(ctx, 100);
+
+    TickType_t now = xTaskGetTickCount();
+    if ((now - last_update) < pdMS_TO_TICKS(5000))
+      continue;
+
+    last_update = now;
+
+    // Update simulated temperature
+    float t_s = (float)(now * portTICK_PERIOD_MS) / 1000.0f;
+    float noise = ((float)(esp_random() % 1000) / 1000.0f - 0.5f) * 0.2f;
+    g_current_temp =
+        baseline + amp_c * sinf(2.0f * (float)M_PI * t_s / period_s) + noise;
+
+    // Check notification triggers
+    float diff = fabsf(g_current_temp - g_last_notified_temp);
+    TickType_t since = now - g_last_notify_tick;
+    bool threshold = diff > 0.5f && !g_suppress_threshold;
+    bool heartbeat = since >= ENV_TEMP_HEARTBEAT_TICKS;
+    bool should_notify = threshold || heartbeat;
+
+    if (threshold) {
+      g_notify_count++;
+      if (g_notify_count >= 10)
+        g_suppress_threshold = true;
+    }
+
+    if (heartbeat) {
+      ESP_LOGI(TAG, "heartbeat reset: re-enabling threshold notifications");
+      g_notify_count = 0;
+      g_suppress_threshold = false;
+    }
+
+    if (should_notify) {
+      ESP_LOGI(TAG, "notify (%s): T=%.2f C, Δ=%.2f C, %lds since last",
+               threshold ? "threshold" : "heartbeat", g_current_temp, diff,
+               (long)(since * portTICK_PERIOD_MS / 1000));
+      g_last_notified_temp = g_current_temp;
+      g_last_notify_tick = xTaskGetTickCount();
+      if (g_env_temp_resource)
+        coap_resource_notify_observers(g_env_temp_resource, NULL);
     }
   }
 }

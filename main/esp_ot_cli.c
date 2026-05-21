@@ -41,8 +41,9 @@
 
 #define TAG "ot_esp_cli"
 
-// Forward declaration — implemented in coap_demo.c
+// Forward declarations — implemented in coap_demo.c and valve_demo.c
 void start_coap_server(void);
+void start_valve_server(void);
 
 void app_main(void) {
   // Used eventfds:
@@ -76,7 +77,13 @@ void app_main(void) {
   };
 
   ESP_ERROR_CHECK(esp_openthread_start(&config));
+#ifdef CONFIG_OPENTHREAD_MTD
+  // MTD/SED board (Node V — valve): start /act/valve server
+  start_valve_server();
+#else
+  // FTD board (Node A — sensor): start /env/temp server
   start_coap_server();
+#endif
 #if CONFIG_OPENTHREAD_CLI_ESP_EXTENSION
   esp_cli_custom_command_init();
 #endif
