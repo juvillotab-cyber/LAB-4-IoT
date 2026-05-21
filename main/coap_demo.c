@@ -1,5 +1,4 @@
 #include <arpa/inet.h>
-#include <math.h>
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -17,8 +16,8 @@ static const char *TAG = "coap_demo";
 #define COAP_PORT 5683
 
 static float g_current_temp = 24.5f;
-static float g_last_notified_temp = 24.5f;
 static coap_resource_t *g_env_temp_resource = NULL;
+static uint32_t g_notify_count = 0;
 
 // CBOR encoder for {"t": <float16>} — six bytes.
 //   A1            map(1)
@@ -73,28 +72,19 @@ static void hnd_env_temp_get(coap_resource_t *resource, coap_session_t *session,
   ESP_LOGI(TAG, "GET /env/temp -> %.2f C (6 B CBOR)", g_current_temp);
 }
 
-// Drives Observe notifications. Mocks a slowly drifting sensor;
-// in Lab 4 this is replaced by the real ADC reading.
-static void temp_update_task(void *arg) {
-  coap_context_t *ctx = (coap_context_t *)arg;
-  while (1) {
-    float delta =
-        ((float)(esp_random() % 1000) / 1000.0f - 0.5f) * 0.6f; // ±0.3
-    if ((esp_random() % 10) == 0)
-      delta += (esp_random() & 1) ? 1.5f : -1.5f;
-    g_current_temp += delta;
+// Simulates a drifting sensor. Called from the main loop every 5 s.
+// Notifies observers on every change so Observe is easy to verify.
+static void update_temp_and_notify(coap_context_t *ctx) {
+  float delta =
+      ((float)(esp_random() % 1000) / 1000.0f - 0.5f) * 0.6f; // ±0.3
+  if ((esp_random() % 10) == 0)
+    delta += (esp_random() & 1) ? 1.5f : -1.5f;
+  g_current_temp += delta;
 
-    float diff = fabsf(g_current_temp - g_last_notified_temp);
-    if (diff > 0.5f) {
-      ESP_LOGI(TAG, "Δ=%.2f C exceeds threshold; notifying observers", diff);
-      g_last_notified_temp = g_current_temp;
-      if (g_env_temp_resource)
-        coap_resource_notify_observers(g_env_temp_resource, NULL);
-    }
-
-    coap_io_process(ctx, 0);
-    vTaskDelay(pdMS_TO_TICKS(5000));
-  }
+  g_notify_count++;
+  ESP_LOGI(TAG, "[%u] temp=%.2f C, notifying observers", g_notify_count, g_current_temp);
+  if (g_env_temp_resource)
+    coap_resource_notify_observers(g_env_temp_resource, NULL);
 }
 
 static void coap_server_task(void *pvParameters) {
@@ -131,9 +121,14 @@ static void coap_server_task(void *pvParameters) {
   ESP_LOGI(TAG, "CoAP server listening on UDP/%d, resource /env/temp",
            COAP_PORT);
 
-  xTaskCreate(temp_update_task, "temp_update", 4096, ctx, 4, NULL);
-  while (1)
+  TickType_t last_update = xTaskGetTickCount();
+  while (1) {
     coap_io_process(ctx, 1000);
+    if ((xTaskGetTickCount() - last_update) >= pdMS_TO_TICKS(5000)) {
+      last_update = xTaskGetTickCount();
+      update_temp_and_notify(ctx);
+    }
+  }
 }
 
 void start_coap_server(void) {
