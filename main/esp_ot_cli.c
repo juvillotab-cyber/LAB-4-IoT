@@ -60,6 +60,8 @@ void app_main(void) {
 
 #if CONFIG_OPENTHREAD_CLI
   ot_console_start();
+#endif
+#if CONFIG_OPENTHREAD_CLI_ESP_EXTENSION
   ot_register_external_commands();
 #endif
 
