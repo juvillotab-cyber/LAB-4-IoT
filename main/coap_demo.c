@@ -75,14 +75,14 @@ static void hnd_env_temp_get(coap_resource_t *resource, coap_session_t *session,
 // Simulates a drifting sensor. Called from the main loop every 5 s.
 // Notifies observers on every change so Observe is easy to verify.
 static void update_temp_and_notify(coap_context_t *ctx) {
-  float delta =
-      ((float)(esp_random() % 1000) / 1000.0f - 0.5f) * 0.6f; // ±0.3
+  float delta = ((float)(esp_random() % 1000) / 1000.0f - 0.5f) * 0.6f; // ±0.3
   if ((esp_random() % 10) == 0)
     delta += (esp_random() & 1) ? 1.5f : -1.5f;
   g_current_temp += delta;
 
   g_notify_count++;
-  ESP_LOGI(TAG, "[%u] temp=%.2f C, notifying observers", g_notify_count, g_current_temp);
+  // ESP_LOGI(TAG, "[%u] temp=%.2f C, notifying observers", g_notify_count,
+  // g_current_temp);
   if (g_env_temp_resource)
     coap_resource_notify_observers(g_env_temp_resource, NULL);
 }
