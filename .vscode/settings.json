@@ -4,7 +4,7 @@
   "idf.openOcdConfigs": [
     "board/esp32c6-builtin.cfg"
   ],
-  "idf.port": "/dev/ttyACM0",
+  "idf.port": "/dev/ttyACM1",
   "idf.currentSetup": "/home/juan-david/.espressif/v5.5.4/esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32c6"

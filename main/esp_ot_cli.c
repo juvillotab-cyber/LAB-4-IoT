@@ -77,6 +77,7 @@ void app_main(void) {
   };
 
   ESP_ERROR_CHECK(esp_openthread_start(&config));
+  esp_log_level_set("coap_demo", ESP_LOG_NONE);
 #ifdef CONFIG_OPENTHREAD_MTD
   // MTD/SED board (Node V — valve): start /act/valve server
   start_valve_server();
